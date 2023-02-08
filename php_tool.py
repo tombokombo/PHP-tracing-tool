@@ -130,10 +130,14 @@ int {name}(struct pt_regs *ctx) {{
 # syscall tracepoint template
 SYS_TRACE_TEMPLATE = """
 TRACEPOINT_PROBE(syscalls, sys_enter_{syscall_name}) {{
-    u64 pid = bpf_get_current_pid_tgid();
+    struct bpf_pidns_info ns = {{}};
+    if(bpf_get_ns_current_pid_tgid(DEV, INO, &ns, sizeof(struct bpf_pidns_info)))
+	    return 0;
+    u64 pid = ((u64)ns.pid << 32);
     if ({pid_condition}) {{
         return 0;
     }}
+    pid = bpf_get_current_pid_tgid();
     u64 time = bpf_ktime_get_ns();
     start.update(&pid, &time);
     {syscall_enter_logic}
@@ -141,12 +145,16 @@ TRACEPOINT_PROBE(syscalls, sys_enter_{syscall_name}) {{
 }}
 
 TRACEPOINT_PROBE(syscalls, sys_exit_{syscall_name}) {{
-    u64 pid = bpf_get_current_pid_tgid();
+    struct bpf_pidns_info ns = {{}};
+    if(bpf_get_ns_current_pid_tgid(DEV, INO, &ns, sizeof(struct bpf_pidns_info)))
+	    return 0;
+    u64 pid = ((u64)ns.pid << 32);
     if ({pid_condition}) {{
         return 0;
     }}
 
     u64 *depth, zero = 0, clazz = 0, method = 0;
+    pid = bpf_get_current_pid_tgid();
 
     struct call_t data = {{}};
     data.type = SYS;
@@ -255,7 +263,10 @@ class Process:
         self.data_buffer.write(data + '\n')
 
     def get_buffer(self):
-        return self.data_buffer.getvalue()
+        ret = self.data_buffer.getvalue()
+        self.data_buffer.close()
+        self.data_buffer = io.StringIO()
+        return ret
 
 
 class Callback:
@@ -356,6 +367,7 @@ class Callback:
                             ENDC)),
                     depth))
             # Quit the program on the last main return
+            print(process.get_buffer())
             if event.depth & (
                     1 << 63) and event.method.decode(
                     'utf-8',
@@ -553,6 +565,9 @@ def main():
 
     program, usdt_tab = c_program(args.pid)
 
+    devinfo = os.stat("/proc/self/ns/pid")
+    for r in (("DEV", str(devinfo.st_dev)), ("INO", str(devinfo.st_ino))):
+      program = program.replace(*r)
     # debug options
     if args.check or args.debug:
         print(program)
